@@ -105,7 +105,7 @@ import type {
   ApplyResult,
   CommandModalName,
 } from './rpc/protocol'
-import { getRpcDir } from './rpc/rpc-dir'
+import { resolveRpcDir } from './rpc/rpc-dir'
 import { type RpcServerHandle, startRpcServer } from './rpc/rpc-server'
 import {
   type AccountQuota,
@@ -1587,6 +1587,7 @@ export async function CodexAuthPlugin(
 
         let rpcServer: RpcServerHandle | null = null
         if (input.directory) {
+          const rpcDir = await resolveRpcDir(input.directory)
           const rpcGlobal = globalThis as {
             __openaiAuthRpcServer?: RpcServerHandle
           }
@@ -1596,7 +1597,9 @@ export async function CodexAuthPlugin(
           }
           try {
             rpcServer = await startRpcServer({
-              dir: getRpcDir(input.directory),
+              dir: rpcDir.dir,
+              secureDir: rpcDir.secureDir,
+              sweepRoot: rpcDir.sweepRoot,
               drain: drainNotifications,
               apply: async (request: ApplyRequest): Promise<ApplyResult> => {
                 const callCtx: CommandContext = {
