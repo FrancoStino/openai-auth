@@ -27,6 +27,7 @@
 │   │   │   ├── raw-ws.ts          # Runtime-aware RawWebSocket selector
 │   │   │   ├── raw-ws-bun.ts      # Bun.connect-backed hand-rolled client
 │   │   │   ├── raw-ws-node.ts     # node:net/node:tls-backed hand-rolled client
+│   │   │   ├── raw-ws-upgrade.ts  # HTTP upgrade status & header parser for rejected handshakes
 │   │   │   ├── hosted-web-search.ts # Provider-hosted web_search tool + replay/SSE translation
 │   │   │   ├── response-stream-error.ts # Stream error type for WS/HTTP
 │   │   │   ├── prompt-context.ts  # Assistant model/variant resolver for synthetic replies
@@ -144,7 +145,7 @@
 - `packages/opencode/src/ws-pool.ts` — per-account WebSocket pool.
 - `packages/opencode/src/ws.ts` — low-level WS connect/stream.
 - `packages/opencode/src/WEBSOCKET.md` — developer reference for WebSocket flow, lifetime, and retry strategies.
-- `packages/opencode/src/raw-ws-bun.ts` / `packages/opencode/src/raw-ws-node.ts` — hand-rolled RFC 6455 clients.
+- `packages/opencode/src/raw-ws-bun.ts` / `packages/opencode/src/raw-ws-node.ts` / `packages/opencode/src/raw-ws-upgrade.ts` — hand-rolled RFC 6455 clients and HTTP upgrade response parser.
 - `packages/opencode/src/hosted-web-search.ts` — provider-hosted `web_search` tool + replay/SSE translation.
 - `packages/opencode/src/quota-normalize.ts` — HTTP/WS/wham → `OAuthQuotaSnapshot`.
 - `packages/opencode/src/sidebar-state.ts` — loader→TUI snapshot, tolerant reader, and SHA-256-keyed sticky session assignments with seven-day TTL.
@@ -159,7 +160,7 @@
 
 ## Naming Conventions
 
-**Files:** lowercase-kebab or lowercase-flat. Top-level files use bare lowercase names (`index.ts`, `cli.ts`, `commands.ts`, `config.ts`, `logger.ts`, `model-costs.ts`, `quota-normalize.ts`, `sidebar-state.ts`, `ws-pool.ts`, `hosted-web-search.ts`, `response-stream-error.ts`, `raw-ws-bun.ts`, `raw-ws-node.ts`, `version.ts`). Subdirectory files share the directory name as a prefix where it helps (`core/accounts.ts`, `core/oauth.ts`, `rpc/rpc-server.ts`, `rpc/port-file.ts`, `util/uuid-v7.ts`).
+**Files:** lowercase-kebab or lowercase-flat. Top-level files use bare lowercase names (`index.ts`, `cli.ts`, `commands.ts`, `config.ts`, `logger.ts`, `model-costs.ts`, `quota-normalize.ts`, `sidebar-state.ts`, `ws-pool.ts`, `hosted-web-search.ts`, `response-stream-error.ts`, `raw-ws-bun.ts`, `raw-ws-node.ts`, `raw-ws-upgrade.ts`, `version.ts`). Subdirectory files share the directory name as a prefix where it helps (`core/accounts.ts`, `core/oauth.ts`, `rpc/rpc-server.ts`, `rpc/port-file.ts`, `util/uuid-v7.ts`).
 Example: `packages/opencode/src/core/cachekeep.ts`, `packages/opencode/src/rpc/rpc-server.ts`.
 
 **Directories:** lowercase-kebab. Subdirectories group by layer (`core/`, `rpc/`, `tests/`, `tui/`, `util/`).
