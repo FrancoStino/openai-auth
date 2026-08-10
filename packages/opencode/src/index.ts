@@ -41,6 +41,10 @@ import {
   shouldFallbackStatus,
 } from './core/accounts'
 import {
+  BackgroundQuotaRefresh,
+  refreshQuotaInBackground,
+} from './core/background-quota-refresh'
+import {
   buildRefreshOperationError,
   formatRefreshBackoffMessage,
   hashRefreshToken,
@@ -111,6 +115,7 @@ import {
   getSidebarStateFile,
   hashSidebarSessionId,
   isQuotaExhausted,
+  type QuotaWindow,
   removeSidebarActiveRouting,
   resolveSessionStickyAccount,
   resolveSidebarStickyAssignment,
@@ -475,6 +480,26 @@ export function mergePushedQuotaMetadata(
   }
 }
 
+// Returns the window unchanged when it already carries a usable checkedAt, or
+// the same window with the entry timestamp stamped onto it when it does not.
+// Absent windows are returned unchanged so we never fabricate a slot the wire
+// did not report. The stamp keeps mergeQuotaByWindow's per-window freshness
+// comparison meaningful against files written without window stamps (old code
+// only wrote the snapshot-level checkedAt).
+function stampWindowCheckedAt(
+  window: QuotaWindow | undefined,
+  entryCheckedAt: number,
+): QuotaWindow | undefined {
+  if (!window) return window
+  if (
+    typeof window.checkedAt === 'number' &&
+    Number.isFinite(window.checkedAt)
+  ) {
+    return window
+  }
+  return { ...window, checkedAt: entryCheckedAt }
+}
+
 export function buildSidebarMachineState(
   qm: QuotaManager,
   store: AccountStorage,
@@ -486,7 +511,18 @@ export function buildSidebarMachineState(
   return {
     main: {
       quota: mainQuota
-        ? { ...(mainQuota as AccountQuota), checkedAt: mainEntry.checkedAt }
+        ? {
+            ...(mainQuota as AccountQuota),
+            checkedAt: mainEntry.checkedAt,
+            primary: stampWindowCheckedAt(
+              mainQuota.primary,
+              mainEntry.checkedAt,
+            ),
+            secondary: stampWindowCheckedAt(
+              mainQuota.secondary,
+              mainEntry.checkedAt,
+            ),
+          }
         : null,
       ...(typeof mainAccountIdentity === 'string'
         ? { mainAccountId: mainAccountIdentity }
@@ -513,6 +549,14 @@ export function buildSidebarMachineState(
             ? {
                 ...(fallbackQuota as AccountQuota),
                 checkedAt: fallbackEntry.checkedAt,
+                primary: stampWindowCheckedAt(
+                  fallbackQuota.primary,
+                  fallbackEntry.checkedAt,
+                ),
+                secondary: stampWindowCheckedAt(
+                  fallbackQuota.secondary,
+                  fallbackEntry.checkedAt,
+                ),
               }
             : null,
           killed: false,
@@ -724,6 +768,12 @@ export async function CodexAuthPlugin(
   let activeRpcServer: RpcServerHandle | null = null
   let sidebarStateFileForEvents: string | undefined
 
+  // Per-loader poller: each plugin invocation owns its timer and callback, so
+  // one loader disposing or re-starting never stops or overwrites another's
+  // background refresh (a module-level singleton let the last loader win and
+  // let any disposal kill the shared poller).
+  const backgroundQuotaRefresh = new BackgroundQuotaRefresh()
+
   async function sendIgnoredMessage(sessionId: string, text: string) {
     const session = input.client.session as
       | { promptAsync?: (req: unknown) => Promise<unknown> }
@@ -749,6 +799,7 @@ export async function CodexAuthPlugin(
 
   return {
     async dispose() {
+      backgroundQuotaRefresh.stop()
       for (const websocketFetch of websocketFetches) websocketFetch.close()
       websocketFetches.length = 0
       if (activeRpcServer) {
@@ -1519,6 +1570,7 @@ export async function CodexAuthPlugin(
             refreshAllQuota({
               getAuth,
               codexRefreshFn,
+              refreshMainWithLease,
               fallbackManager,
               quotaManager,
               loadAccounts,
@@ -2522,6 +2574,7 @@ export async function CodexAuthPlugin(
           void refreshAllQuota({
             getAuth,
             codexRefreshFn,
+            refreshMainWithLease,
             fallbackManager,
             quotaManager,
             loadAccounts,
@@ -2543,6 +2596,46 @@ export async function CodexAuthPlugin(
             }),
           )
         }
+
+        backgroundQuotaRefresh.start(
+          async () => {
+            const results = await refreshQuotaInBackground({
+              getAuth,
+              codexRefreshFn,
+              refreshMainWithLease,
+              fallbackManager,
+              quotaManager,
+              loadAccounts,
+              writeSidebarState: (qm, store) =>
+                backgroundQuotaRefresh.isStopped()
+                  ? Promise.resolve()
+                  : writeMachineSidebarState(qm, store),
+              client: input.client as Parameters<
+                typeof refreshAllQuota
+              >[0]['client'],
+              fetchImpl: fetch,
+              now: Date.now,
+              configPath: getConfigPath(),
+              storageMainAccountId: storage?.mainAccountId,
+              isOAuthAccountFn: isOAuthAccount,
+              whamFn: whamUsageFn,
+              readSidebarState: () => getSidebarState(boundSidebarFile),
+            })
+            const failures = results.filter((result) => !result.ok)
+            if (failures.length > 0) {
+              logQ.warn('background quota refresh completed with failures', {
+                pid: process.pid,
+                failures,
+              })
+            }
+          },
+          (error) => {
+            logQ.warn('background quota refresh failed', {
+              pid: process.pid,
+              error: error instanceof Error ? error.message : String(error),
+            })
+          },
+        )
 
         // -------------------------------------------------------------------
         // Fetch override that selects the active account, refreshes if
@@ -2979,6 +3072,7 @@ export async function CodexAuthPlugin(
             return finalResponse
           },
           async dispose() {
+            backgroundQuotaRefresh.stop()
             cacheKeepManager.stop()
             if (
               cacheKeepGlobal.__openaiAuthCacheKeepManager === cacheKeepManager

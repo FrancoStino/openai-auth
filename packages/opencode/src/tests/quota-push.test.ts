@@ -472,6 +472,8 @@ describe('QuotaManager push', () => {
         checkedAt: 1,
       },
       'fallback-token',
+      false,
+      'captured-account-id',
     )
     const store: AccountStorage = {
       version: 1,
@@ -485,6 +487,7 @@ describe('QuotaManager push', () => {
           refresh: 'fallback-refresh',
           expires: 10,
           enabled: true,
+          accountId: 'live-account-id',
         },
       ],
     }
@@ -510,6 +513,9 @@ describe('QuotaManager push', () => {
         {
           id: 'fallback-1',
           label: undefined,
+          // The cached snapshot's identity wins over the live account's, so a
+          // re-login never pairs the previous identity's quota with the new id.
+          accountId: 'captured-account-id',
           quota: {
             checkedAt: 1,
             primary: {
