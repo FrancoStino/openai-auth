@@ -11,8 +11,9 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
+import type { AccountStorage } from '../core/accounts.ts'
 import { acquireRefreshFileLock } from '../core/refresh-file-lock'
-import { buildSidebarMachineState } from '../index.ts';
+import { buildSidebarMachineState } from '../index.ts'
 import { flushForTest, setLogLevel } from '../logger'
 import {
   ACTIVE_ROUTING_MAX_AGE_MS,

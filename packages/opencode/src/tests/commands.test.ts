@@ -41,6 +41,21 @@ import {
 } from '../sidebar-state'
 import { FLOOR_AUTH_FILE, FLOOR_STATE_FILE } from './setup-env.ts'
 
+// The account-add completion runs detached from buildDialogPayload and performs
+// lock-based file I/O, so its duration tracks machine load rather than any fixed
+// interval. Poll for the observable effect instead of sleeping a guessed amount:
+// a fixed tick either fails under CPU contention or wastes time on every run.
+async function waitUntil(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  throw new Error(`waitUntil timed out after ${timeoutMs}ms`)
+}
 function makeAccount(
   id: string,
   overrides: Partial<OAuthAccount> = {},
@@ -1417,7 +1432,9 @@ describe('commands (add)', () => {
     resolveAccount(makeAccount('added-acct', { label: 'work' }))
 
     // Wait for the detached .then to flush
-    await new Promise((r) => setTimeout(r, 50))
+    await waitUntil(
+      async () => ((await loadAccounts(configPath))?.accounts.length ?? 0) >= 1,
+    )
 
     // Verify the account was persisted
     const storage = await loadAccounts(configPath)
@@ -1456,11 +1473,16 @@ describe('commands (add)', () => {
 
     // First add
     await bdp('openai-account', 'add personal', ctx)
-    await new Promise((r) => setTimeout(r, 50))
+    await waitUntil(
+      async () => ((await loadAccounts(configPath))?.accounts.length ?? 0) >= 1,
+    )
 
     // Second add with same label
     await bdp('openai-account', 'add personal', ctx)
-    await new Promise((r) => setTimeout(r, 50))
+    // Absence assertion: the duplicate must NOT be added, so there is no
+    // observable effect to poll for. Wait long enough for the completion to
+    // have run and been rejected.
+    await new Promise((r) => setTimeout(r, 250))
 
     const storage = await loadAccounts(configPath)
     expect(storage?.accounts).toHaveLength(1)
@@ -1493,7 +1515,9 @@ describe('commands (add)', () => {
     }
 
     await bdp('openai-account', 'add fb', ctx)
-    await new Promise((r) => setTimeout(r, 50))
+    await waitUntil(
+      async () => ((await loadAccounts(configPath))?.accounts.length ?? 0) >= 1,
+    )
 
     const storage = await loadAccounts(configPath)
     for (const a of storage?.accounts ?? []) {
@@ -1539,7 +1563,10 @@ describe('commands (add)', () => {
     }
 
     await bdp('openai-account', 'add test', ctx)
-    await new Promise((r) => setTimeout(r, 50))
+    // Absence assertion: the main account must NOT be added as a fallback, so
+    // there is no observable effect to poll for. Wait long enough for the
+    // completion to have run and been rejected.
+    await new Promise((r) => setTimeout(r, 250))
 
     // Storage accounts[] should still be empty — main was rejected
     const storage = await loadAccounts(configPath)
@@ -1587,7 +1614,7 @@ describe('commands (add)', () => {
     }
 
     await bdp('openai-account', 'add test', ctx)
-    await new Promise((r) => setTimeout(r, 50))
+    await waitUntil(() => notifyCalls.length >= 1)
 
     expect(notifyCalls.length).toBe(1)
     expect(notifyCalls[0]?.text).toContain('already your main account')
@@ -1623,7 +1650,7 @@ describe('commands (add)', () => {
     }
 
     await bdp('openai-account', 'add test', ctx)
-    await new Promise((r) => setTimeout(r, 50))
+    await waitUntil(() => notifyCalls.length >= 1)
 
     expect(notifyCalls.length).toBe(1)
     expect(notifyCalls[0]?.text).toContain('OAuth timeout')
@@ -1732,7 +1759,7 @@ describe('commands (add)', () => {
     }
 
     await bdp('openai-account', 'add work', ctx)
-    await new Promise((r) => setTimeout(r, 50))
+    await waitUntil(() => refreshCalls.length >= 1)
 
     expect(refreshCalls.length).toBe(1)
     const storage = await loadAccounts(configPath)
