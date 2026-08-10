@@ -18,7 +18,7 @@ import {
 } from 'solid-js'
 import { createLogger } from './logger.js'
 import { createRpcClient } from './rpc/rpc-client.js'
-import { getRpcDir } from './rpc/rpc-dir.js'
+import { resolveRpcDir } from './rpc/rpc-dir.js'
 import {
   type AccountQuota,
   computeQuotaPacing,
@@ -856,17 +856,14 @@ const tui: TuiPlugin = async (api) => {
   if (!rpcPollStarted) {
     rpcPollStarted = true
     const myPid = process.pid
-    const rpcClient = createRpcClient(
-      getRpcDir(api.state.path.directory ?? ''),
-      myPid,
-      (entry) => {
-        log.debug('rpc tui pid', {
-          myPid,
-          matchedPortFilePid: entry?.pid ?? null,
-          rpcPort: entry?.port ?? null,
-        })
-      },
-    )
+    const rpcDir = await resolveRpcDir(api.state.path.directory ?? '')
+    const rpcClient = createRpcClient(rpcDir.dir, myPid, (entry) => {
+      log.debug('rpc tui pid', {
+        myPid,
+        matchedPortFilePid: entry?.pid ?? null,
+        rpcPort: entry?.port ?? null,
+      })
+    })
     let lastNotificationId = 0
     let rpcInFlight = false
     setInterval(() => {
