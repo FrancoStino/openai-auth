@@ -2242,6 +2242,12 @@ export async function CodexAuthPlugin(
               candidate.quotaCheckedAt,
             ]),
           )
+          const wireAccountIdByAccount = Object.fromEntries(
+            eligibleCandidates.map((candidate) => [
+              candidate.accountId,
+              candidate.wireAccountId,
+            ]),
+          )
           const excluded = new Set(input.excludeAccountIds)
           let placement:
             | {
@@ -2258,6 +2264,7 @@ export async function CodexAuthPlugin(
               validPinnedAccountIds: [...candidatesById.keys()],
               excludeAccountIds: input.excludeAccountIds,
               quotaCheckedAtByAccount,
+              wireAccountIdByAccount,
               choose: (pendingBytes) => {
                 const eligible = eligibleCandidates.filter(
                   (candidate) => !excluded.has(candidate.accountId),
