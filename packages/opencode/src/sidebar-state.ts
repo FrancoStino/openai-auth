@@ -100,6 +100,7 @@ export type ActiveRoutingMap = Record<string, ActiveRoutingEntry>
 
 export interface StickyAssignment {
   accountId: string
+  wireAccountId?: string
   assignedAt: number
   lastSeenAt: number
   inputBytes: number
@@ -120,6 +121,7 @@ export interface ResolveStickyAssignmentInput {
   validPinnedAccountIds: readonly string[]
   excludeAccountIds?: readonly string[]
   quotaCheckedAtByAccount: Readonly<Record<string, number | undefined>>
+  wireAccountIdByAccount?: Readonly<Record<string, string | undefined>>
   choose: (
     pendingBytes: ReadonlyMap<string, number>,
   ) => StickyAssignmentChoice | undefined
@@ -256,12 +258,14 @@ function normalizeStickyAssignments(
     ) {
       continue
     }
+    const wireAccountId = assignment.wireAccountId
     normalized[sessionHash] = {
       accountId: assignment.accountId,
       assignedAt: assignment.assignedAt,
       lastSeenAt: assignment.lastSeenAt,
       inputBytes: assignment.inputBytes,
       ...(quotaCheckedAt === undefined ? {} : { quotaCheckedAt }),
+      ...(typeof wireAccountId === 'string' ? { wireAccountId } : {}),
     }
   }
 
@@ -652,10 +656,24 @@ function stickyAssignmentNeedsMetadataUpdate(
   assignment: StickyAssignment,
   requestBytes: number,
   now: number,
+  wireAccountId: string | undefined,
 ): boolean {
   return (
     requestBytes > assignment.inputBytes ||
-    now - assignment.lastSeenAt >= STICKY_ASSIGNMENT_LAST_SEEN_TOUCH_MS
+    now - assignment.lastSeenAt >= STICKY_ASSIGNMENT_LAST_SEEN_TOUCH_MS ||
+    (assignment.wireAccountId === undefined && wireAccountId !== undefined)
+  )
+}
+
+function hasStickyIdentityMismatch(
+  assignment: StickyAssignment,
+  wireAccountId: string | undefined,
+): boolean {
+  // Missing identity metadata must retain the cache-warm pin until a known change proves it stale.
+  return (
+    typeof assignment.wireAccountId === 'string' &&
+    typeof wireAccountId === 'string' &&
+    assignment.wireAccountId !== wireAccountId
   )
 }
 
@@ -692,9 +710,11 @@ function readonlyPendingBytes(
 function pendingBytesForAssignments(
   assignments: StickyAssignmentMap | undefined,
   quotaCheckedAtByAccount: Readonly<Record<string, number | undefined>>,
+  excludedSessionHash?: string,
 ): ReadonlyMap<string, number> {
   const pendingBytes = new Map<string, number>()
-  for (const assignment of Object.values(assignments ?? {})) {
+  for (const [sessionHash, assignment] of Object.entries(assignments ?? {})) {
+    if (sessionHash === excludedSessionHash) continue
     if (
       assignment.quotaCheckedAt !==
       quotaCheckedAtByAccount[assignment.accountId]
@@ -1178,10 +1198,15 @@ export async function resolveSidebarStickyAssignment(
       excludedAccountIds,
       input.now,
     ) &&
+    !hasStickyIdentityMismatch(
+      existing,
+      input.wireAccountIdByAccount?.[existing.accountId],
+    ) &&
     !stickyAssignmentNeedsMetadataUpdate(
       existing,
       input.requestBytes,
       input.now,
+      input.wireAccountIdByAccount?.[existing.accountId],
     )
   ) {
     return existing
@@ -1202,23 +1227,38 @@ export async function resolveSidebarStickyAssignment(
           stickyAssignments,
         )
         const current = stickyAssignments?.[sessionHash]
+        const currentIdentityMismatch =
+          current !== undefined &&
+          hasStickyIdentityMismatch(
+            current,
+            input.wireAccountIdByAccount?.[current.accountId],
+          )
         if (
           isValidStickyAssignment(
             current,
             validPinnedAccountIds,
             excludedAccountIds,
             input.now,
-          )
+          ) &&
+          !currentIdentityMismatch
         ) {
           const metadataNeedsUpdate = stickyAssignmentNeedsMetadataUpdate(
             current,
             input.requestBytes,
             input.now,
+            input.wireAccountIdByAccount?.[current.accountId],
           )
           const assignment = metadataNeedsUpdate
             ? {
                 ...current,
                 inputBytes: Math.max(current.inputBytes, input.requestBytes),
+                ...(current.wireAccountId === undefined &&
+                input.wireAccountIdByAccount?.[current.accountId] !== undefined
+                  ? {
+                      wireAccountId:
+                        input.wireAccountIdByAccount?.[current.accountId],
+                    }
+                  : {}),
                 ...(input.now - current.lastSeenAt >=
                 STICKY_ASSIGNMENT_LAST_SEEN_TOUCH_MS
                   ? { lastSeenAt: input.now }
@@ -1241,6 +1281,8 @@ export async function resolveSidebarStickyAssignment(
           pendingBytesForAssignments(
             stickyAssignments,
             input.quotaCheckedAtByAccount,
+            // A mismatched pin belongs to a prior identity and cannot steer its replacement.
+            currentIdentityMismatch ? sessionHash : undefined,
           ),
         )
         if (!choice) {
@@ -1261,6 +1303,11 @@ export async function resolveSidebarStickyAssignment(
           ...(choice.quotaCheckedAt === undefined
             ? {}
             : { quotaCheckedAt: choice.quotaCheckedAt }),
+          ...(input.wireAccountIdByAccount?.[choice.accountId] === undefined
+            ? {}
+            : {
+                wireAccountId: input.wireAccountIdByAccount?.[choice.accountId],
+              }),
         }
         return {
           ...latest,

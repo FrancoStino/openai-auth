@@ -2977,6 +2977,7 @@ describe('integration: active fallback routing', () => {
       const firstAssignment =
         firstState.stickyAssignments?.[hashSidebarSessionId('sticky-session')]
       expect(firstAssignment?.accountId).toBe('fallback-2')
+      expect(firstAssignment?.wireAccountId).toBe('acc-fallback-2')
 
       const changed = JSON.parse(readFileSync(sidebarFile, 'utf8'))
       changed.fallbacks[0].quota = stickyQuota(100, Date.now())
@@ -3005,6 +3006,10 @@ describe('integration: active fallback routing', () => {
         finalState.stickyAssignments?.[hashSidebarSessionId('cold-session')]
           ?.accountId,
       ).toBe('fallback-1')
+      expect(
+        finalState.stickyAssignments?.[hashSidebarSessionId('cold-session')]
+          ?.wireAccountId,
+      ).toBe('acc-fallback-1')
     } finally {
       globalThis.fetch = originalFetch
       await hooks?.dispose?.()
