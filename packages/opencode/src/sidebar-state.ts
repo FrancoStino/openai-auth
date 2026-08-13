@@ -669,7 +669,15 @@ function hasStickyIdentityMismatch(
   assignment: StickyAssignment,
   wireAccountId: string | undefined,
 ): boolean {
-  // Missing identity metadata must retain the cache-warm pin until a known change proves it stale.
+  // True only when both sides know their ChatGPT account and those accounts
+  // differ, which means the slot this session was placed on now holds a
+  // different account than it did at placement.
+  //
+  // An unknown on either side deliberately reports no mismatch. A session is
+  // pinned to keep its prompt cache warm, and treating missing data as a
+  // change would place sessions again for no reason and throw those caches
+  // away — worse than leaving a rare wrong pin in place until real evidence
+  // arrives.
   return (
     typeof assignment.wireAccountId === 'string' &&
     typeof wireAccountId === 'string' &&
@@ -1281,7 +1289,11 @@ export async function resolveSidebarStickyAssignment(
           pendingBytesForAssignments(
             stickyAssignments,
             input.quotaCheckedAtByAccount,
-            // A mismatched pin belongs to a prior identity and cannot steer its replacement.
+            // Pending bytes weigh how much traffic each account is already
+            // committed to, so the session being placed must not weigh its own
+            // stale entry: that entry belongs to the account it is moving off,
+            // and counting it would bias placement away from a perfectly good
+            // destination. Other sessions' entries still count.
             currentIdentityMismatch ? sessionHash : undefined,
           ),
         )
