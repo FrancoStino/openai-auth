@@ -14,6 +14,7 @@
  *   bun scripts/measure-store-contention.mjs --sessions 1,4,12,24 --turns 20
  *   bun scripts/measure-store-contention.mjs --path mutate
  *   bun scripts/measure-store-contention.mjs --sessions 12 --load 40
+ *   bun scripts/measure-store-contention.mjs --path mutate --storm --sessions 12 --load 12
  *
  * --load runs N synchronous CPU hogs alongside the writes. The host process is
  * single-threaded, so sessions streaming and parsing responses compete with the
@@ -21,6 +22,16 @@
  * so under a saturated loop it can expire having made very few actual attempts —
  * a different failure from genuine lock contention, and one an in-process queue
  * would not fix. The attempts count in the timeout message distinguishes them.
+ *
+ * --storm models correlated arrival: every session writes at the same instant,
+ * as token refreshes do (tokens issued in one window expire in one window).
+ *
+ * It is NOT the worst case, despite sounding like it. Each round waits for all
+ * sessions before starting the next, so the queue fully drains between rounds.
+ * Sustained independent traffic overlaps continuously and is measurably harsher
+ * (12 sessions, load 12, mutate path: 6-9 failures under --storm versus 17-23
+ * without it). Use --storm to compare PATHS under identical arrival, and the
+ * default to price sustained pressure.
  *
  * Two write paths, because they cost very different amounts:
  *   state  - saveAccountState, the per-request bookkeeping stamp. State lock only.
@@ -35,9 +46,17 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 function parseArgs(argv) {
-  const args = { sessions: [1, 4, 12, 24], turns: 20, path: 'state', load: 0 }
+  const args = {
+    sessions: [1, 4, 12, 24],
+    turns: 20,
+    path: 'state',
+    load: 0,
+    storm: false,
+  }
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--load' && argv[i + 1]) {
+    if (argv[i] === '--storm') {
+      args.storm = true
+    } else if (argv[i] === '--load' && argv[i + 1]) {
       args.load = Number.parseInt(argv[++i], 10)
     } else if (argv[i] === '--path' && argv[i + 1]) {
       args.path = argv[++i]
@@ -104,26 +123,43 @@ async function turn(accounts, storage, cfgPath, accountId, path) {
   }
 }
 
-async function measure(accounts, cfgPath, sessions, turns, path) {
+async function measure(accounts, cfgPath, sessions, turns, path, storm) {
   const storage = await accounts.loadAccounts(cfgPath)
   if (!storage) throw new Error('seeded store failed to load')
 
   const samples = []
   let failures = 0
 
+  const record = (result) => {
+    samples.push(result.ms)
+    if (!result.ok) failures++
+  }
+
   // All sessions start together. A simultaneous burst is the shape that causes
   // acquire timeouts; a steady trickle of the same total volume does not, since
   // each writer finds the lock free.
-  await Promise.all(
-    Array.from({ length: sessions }, async (_unused, session) => {
-      const accountId = `fb-${session % storage.accounts.length}`
-      for (let i = 0; i < turns; i++) {
-        const result = await turn(accounts, storage, cfgPath, accountId, path)
-        samples.push(result.ms)
-        if (!result.ok) failures++
-      }
-    }),
-  )
+  if (storm) {
+    // Every session issues its writes at the same instant, repeated per round.
+    // This is the refresh-storm shape: not more total writes, but all of them
+    // contending for the same window.
+    for (let round = 0; round < turns; round++) {
+      await Promise.all(
+        Array.from({ length: sessions }, async (_unused, session) => {
+          const accountId = `fb-${session % storage.accounts.length}`
+          record(await turn(accounts, storage, cfgPath, accountId, path))
+        }),
+      )
+    }
+  } else {
+    await Promise.all(
+      Array.from({ length: sessions }, async (_unused, session) => {
+        const accountId = `fb-${session % storage.accounts.length}`
+        for (let i = 0; i < turns; i++) {
+          record(await turn(accounts, storage, cfgPath, accountId, path))
+        }
+      }),
+    )
+  }
 
   samples.sort((a, b) => a - b)
   return {
@@ -170,7 +206,8 @@ async function main() {
 
   console.log(
     `write path: ${args.path}   turns per session: ${args.turns}   ` +
-      `event-loop load: ${args.load}`,
+      `event-loop load: ${args.load}   ` +
+      `arrival: ${args.storm ? 'correlated (storm)' : 'independent'}`,
   )
   console.log('')
   console.log('sessions | writes | failed |    p50 |    p95 |    p99 |    max')
@@ -185,6 +222,7 @@ async function main() {
         sessions,
         args.turns,
         args.path,
+        args.storm,
       )
       const fmt = (value) => `${value.toFixed(1)}ms`.padStart(7)
       console.log(
