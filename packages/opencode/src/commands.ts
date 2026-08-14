@@ -8,6 +8,7 @@ import {
   type OAuthAccount,
   type RoutingMode,
 } from './core/accounts'
+import type { FallbackAccount } from './core/accounts.ts'
 import type { CacheKeepManager, CacheKeepWindow } from './core/cachekeep'
 import { beginAccountLogin, upsertAccount } from './core/oauth'
 import { whamUsageFn } from './core/provider'
@@ -30,6 +31,7 @@ import type {
   CommandModalName,
   OpenDialogPayload,
 } from './rpc/protocol'
+import { isRecord } from './util/record.ts'
 
 // ---------------------------------------------------------------------------
 // Command name constants
@@ -199,6 +201,28 @@ async function executeQuotaCommand(
   return { command: 'openai-quota', text: lines.join('\n'), knobs: {} }
 }
 
+/**
+ * Project a stored account down to the fields a dialog may see.
+ *
+ * Stored accounts carry live credentials (`access`, `refresh`, `apiKey`). Knobs
+ * are returned across the loopback RPC boundary and JSON-serialized to the TUI,
+ * so handing back raw account objects would publish those secrets to every RPC
+ * client and into anything that logs an apply result. The dialogs only ever need
+ * identity here — the account list is rendered from `text`, and the TUI reads
+ * nothing from these entries but their count.
+ *
+ * Build the result field by field. A destructuring omit (`...rest`) would
+ * silently republish any secret added to the account types later.
+ */
+function accountKnob(account: FallbackAccount) {
+  return {
+    id: account.id,
+    type: account.type ?? 'oauth',
+    enabled: account.enabled,
+    label: account.label,
+  }
+}
+
 async function executeAccountCommand(
   args: string,
   ctx: CommandContext,
@@ -235,7 +259,7 @@ async function executeAccountCommand(
     return {
       command: 'openai-account',
       text: lines.join('\n'),
-      knobs: { accounts },
+      knobs: { accounts: accounts.map(accountKnob) },
     }
   }
 
@@ -257,7 +281,7 @@ async function executeAccountCommand(
       return {
         command: 'openai-account',
         text: `## Account Not Found\n\nNo account with id \`${targetId}\` exists.`,
-        knobs: { accounts: next.accounts },
+        knobs: { accounts: next.accounts.map(accountKnob) },
       }
     }
 
@@ -267,7 +291,7 @@ async function executeAccountCommand(
     return {
       command: 'openai-account',
       text: `## Account Removed\n\nRemoved account \`${targetId}\`.`,
-      knobs: { accounts: next.accounts },
+      knobs: { accounts: next.accounts.map(accountKnob) },
     }
   }
 
@@ -293,7 +317,7 @@ async function executeAccountCommand(
       return {
         command: 'openai-account',
         text: '## Invalid Order\n\nBoth account IDs must exist.',
-        knobs: { accounts: next.accounts },
+        knobs: { accounts: next.accounts.map(accountKnob) },
       }
     }
     log.info('accounts reordered', { a: tokens[1], b: tokens[2] })
@@ -301,7 +325,7 @@ async function executeAccountCommand(
     return {
       command: 'openai-account',
       text: `## Accounts Reordered\n\nSwapped positions of \`${tokens[1]}\` and \`${tokens[2]}\`.`,
-      knobs: { accounts: next.accounts },
+      knobs: { accounts: next.accounts.map(accountKnob) },
     }
   }
 
@@ -399,7 +423,7 @@ async function executeAccountCommand(
   return {
     command: 'openai-account',
     text: '## Account Commands\n\n- `/openai-account` — show accounts\n- `/openai-account add [label]` — add a new account\n- `/openai-account remove <id>` — remove\n- `/openai-account order <a> <b>` — swap fallback positions\n\nRouting modes are `main-first`, `fallback-first`, and `sticky-balanced`. `/openai-routing reset` clears the current session pin.',
-    knobs: { accounts },
+    knobs: { accounts: accounts.map(accountKnob) },
   }
 }
 
@@ -1590,7 +1614,92 @@ async function executeResetCommand(
 // Public API
 // ---------------------------------------------------------------------------
 
+/**
+ * Knob keys that must never cross the RPC boundary.
+ *
+ * These are the credential fields on the stored account types plus the generic
+ * secret names. `authHeader` is included because an API-key account can carry a
+ * full `Authorization` value in it.
+ */
+const CREDENTIAL_KNOB_KEYS = new Set([
+  'access',
+  'refresh',
+  'apikey',
+  'authheader',
+  'password',
+  'secret',
+])
+
+function isCredentialKnobKey(key: string) {
+  const normalized = key.toLowerCase().replace(/[-_]/g, '')
+  if (CREDENTIAL_KNOB_KEYS.has(normalized)) return true
+  // No legitimate knob ends in "token"; a stored access/refresh token reaching a
+  // knob under any name is a leak regardless of what it is called.
+  return normalized.endsWith('token')
+}
+
+/**
+ * Strip credential-shaped fields from a dialog payload's knobs.
+ *
+ * Knobs are returned across the loopback RPC and JSON-serialized to the TUI, so
+ * a knob is a published surface. Individual commands project their own knobs
+ * deliberately (see accountKnob), but this is the boundary backstop: a future
+ * command that returns a stored object directly cannot leak credentials even if
+ * the projection is forgotten, because nothing credential-shaped survives here.
+ *
+ * Scrub rather than throw. A rejected dialog is a visible outage for a live
+ * command, while a scrubbed one keeps working with the leak removed; the warning
+ * is what gets the projection fixed. Recurses into nested objects and arrays,
+ * since the account list arrives as an array of records.
+ */
+// Exported for direct testing: no command currently returns an unprojected knob,
+// so a test driven through buildDialogPayload would pass whether or not the
+// scrub runs. Testing the mechanism itself is what actually has teeth.
+export function scrubKnobs(
+  value: unknown,
+  path: string,
+  found: string[],
+): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry, index) =>
+      scrubKnobs(entry, `${path}[${index}]`, found),
+    )
+  }
+  if (!isRecord(value)) return value
+  const result: Record<string, unknown> = {}
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (isCredentialKnobKey(key)) {
+      found.push(`${path}.${key}`)
+      continue
+    }
+    result[key] = scrubKnobs(entry, `${path}.${key}`, found)
+  }
+  return result
+}
+
 export async function buildDialogPayload(
+  command: CommandModalName,
+  args: string,
+  ctx: CommandContext,
+): Promise<OpenDialogPayload> {
+  const payload = await buildDialogPayloadUnchecked(command, args, ctx)
+  const found: string[] = []
+  const knobs = scrubKnobs(payload.knobs, 'knobs', found) as Record<
+    string,
+    unknown
+  >
+  if (found.length > 0) {
+    // Names only — never the values, which are the credentials themselves.
+    log.warn('credential-shaped knob stripped before RPC', {
+      command,
+      fields: found,
+    })
+    return { ...payload, knobs }
+  }
+  return payload
+}
+
+async function buildDialogPayloadUnchecked(
   command: CommandModalName,
   args: string,
   ctx: CommandContext,

@@ -660,6 +660,97 @@ describe('commands', () => {
     },
   )
 
+  test('account dialog knobs never carry credentials across the RPC boundary', async () => {
+    // Knobs are returned over the loopback RPC and JSON-serialized to the TUI, so
+    // anything left on them is published to every RPC client and to anything that
+    // logs an apply result. Stored accounts carry live access/refresh tokens, so
+    // the dialog must project identity fields only.
+    await saveAccounts(
+      {
+        version: 1,
+        main: { type: 'opencode', provider: 'openai' },
+        accounts: [
+          {
+            id: 'fb-secretcheck',
+            type: 'oauth',
+            label: 'work',
+            access: 'ACCESS-MUST-NOT-LEAK',
+            refresh: 'REFRESH-MUST-NOT-LEAK',
+            expires: Date.now() + 3600_000,
+            addedAt: Date.now(),
+            lastUsed: Date.now(),
+          },
+        ],
+      },
+      configPath,
+    )
+
+    const ctx: CommandContext = {
+      accountStoragePath: configPath,
+      quotaManager: new QuotaManager({ storage: { version: 1, accounts: [] } }),
+      loadAccounts,
+      client: makeClient(),
+    }
+
+    // Every account-command surface that returns an accounts knob.
+    for (const args of ['', 'help', 'remove missing', 'order missing other']) {
+      const payload = await buildDialogPayload('openai-account', args, ctx)
+      const wire = JSON.stringify(payload.knobs)
+      expect(wire).not.toContain('ACCESS-MUST-NOT-LEAK')
+      expect(wire).not.toContain('REFRESH-MUST-NOT-LEAK')
+      // Non-vacuous: the knob must still carry the identity the dialog needs,
+      // so an empty or absent accounts array cannot pass this test.
+      if (args === '' || args === 'help') {
+        expect(wire).toContain('fb-secretcheck')
+      }
+    }
+  })
+
+  test('the RPC knob scrub strips credential fields a command forgot to project', async () => {
+    // Backstop for the whole command class. Tested directly rather than through
+    // buildDialogPayload: every command currently projects its own knobs, so a
+    // dispatch-level test would pass with the scrub removed and prove nothing.
+    const { scrubKnobs } = await import('../commands.ts')
+    const found: string[] = []
+    const scrubbed = scrubKnobs(
+      {
+        accounts: [
+          {
+            id: 'leaky',
+            label: 'work',
+            access: 'BOUNDARY-ACCESS-LEAK',
+            refresh: 'BOUNDARY-REFRESH-LEAK',
+            apiKey: 'BOUNDARY-APIKEY-LEAK',
+            authHeader: 'Bearer BOUNDARY-HEADER-LEAK',
+            // Named nothing like the known fields, but still a token.
+            sessionToken: 'BOUNDARY-SUFFIX-LEAK',
+          },
+        ],
+        mode: 'main-first',
+      },
+      'knobs',
+      found,
+    )
+
+    const wire = JSON.stringify(scrubbed)
+    for (const secret of [
+      'BOUNDARY-ACCESS-LEAK',
+      'BOUNDARY-REFRESH-LEAK',
+      'BOUNDARY-APIKEY-LEAK',
+      'BOUNDARY-HEADER-LEAK',
+      'BOUNDARY-SUFFIX-LEAK',
+    ]) {
+      expect(wire).not.toContain(secret)
+    }
+    // Non-credential fields must survive, or the scrub would break every dialog.
+    expect(wire).toContain('leaky')
+    expect(wire).toContain('work')
+    expect(wire).toContain('main-first')
+    // Reports what it removed, by path, so the projection gets fixed.
+    expect(found).toContain('knobs.accounts[0].access')
+    expect(found).toContain('knobs.accounts[0].sessionToken')
+  })
+
   test('scalar command (routing) with a STALE snapshot does not resurrect a removed account or its secrets', async () => {
     // Disk authoritatively has only account `a` (e.g. `gone` was just removed by
     // another session). The scalar command handler, however, loaded a STALE
