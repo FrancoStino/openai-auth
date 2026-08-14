@@ -2682,7 +2682,13 @@ export async function CodexAuthPlugin(
               throw error
             }
             if (!shouldFallbackStatus(response.status, fallbackStorage)) {
-              await fallbackManager.markUsed(candidate.fallback)
+              // Not awaited: the response is already in hand, and this only
+              // stamps a telemetry timestamp nothing reads. Awaiting it puts a
+              // contended store write between the provider's answer and the
+              // user's screen — measured at 3.6s median and 15s worst case on a
+              // busy host. markUsed swallows its own failures, so a dropped
+              // stamp cannot surface as an unhandled rejection.
+              void fallbackManager.markUsed(candidate.fallback)
               return {
                 response,
                 accessToken: candidate.access,
@@ -2758,7 +2764,9 @@ export async function CodexAuthPlugin(
             }
 
             if (!shouldFallbackStatus(response.status, fallbackStorage)) {
-              await fallbackManager.markUsed(candidate.fallback)
+              // See the fallback-first path above: telemetry only, never awaited
+              // on the request path.
+              void fallbackManager.markUsed(candidate.fallback)
               return { response, ...lastQuotaTarget }
             }
             await pushFailedFallbackQuota(response, candidate)
@@ -3067,7 +3075,9 @@ export async function CodexAuthPlugin(
                   stickyCandidate.fallback &&
                   !shouldFallbackStatus(stickyResponse.status, reqStorage)
                 ) {
-                  await fallbackManager.markUsed(stickyCandidate.fallback)
+                  // See the fallback-first path above: telemetry only, never
+                  // awaited on the request path.
+                  void fallbackManager.markUsed(stickyCandidate.fallback)
                 }
                 await writeRequestSidebarRouting(
                   sidebarSessionId,
