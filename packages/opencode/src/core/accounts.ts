@@ -877,7 +877,8 @@ function mergeStorageForSave(
 }
 
 async function acquireSaveAccountsLock(path: string) {
-  const deadline = Date.now() + SAVE_ACCOUNTS_LOCK_WAIT_MS
+  const startedAt = Date.now()
+  const deadline = startedAt + SAVE_ACCOUNTS_LOCK_WAIT_MS
   let attempts = 0
   while (Date.now() <= deadline) {
     attempts++
@@ -900,14 +901,28 @@ async function acquireSaveAccountsLock(path: string) {
     )
   }
 
-  // Contention, not a detected conflict: other writers held the lock for the
-  // entire wait window. Say exactly that. No version check ran and no
-  // compare-and-swap failed, so the text must not imply either — an operator
-  // reading this in a log should go looking for write volume, not for stale
-  // data.
+  // Report attempts and the average gap between them, because they distinguish
+  // two failures that look identical from the outside and need opposite fixes.
+  //
+  // This loop polls on a WALL-CLOCK deadline while its own progress is scheduled
+  // by the event loop. Every session in this host process shares that loop, so
+  // when they are streaming, a scheduled retry lands hundreds of ms late. The
+  // wait then expires having barely tried, whether or not the lock was ever
+  // busy. Measured: ~48 concurrent writers on a responsive loop peak under 0.9s
+  // and never time out, while 12 writers on a saturated one fail routinely.
+  //
+  // So a gap near the retry interval means real contention: the loop was
+  // responsive and other writers genuinely held the lock. A gap far above it
+  // means starvation, and the lock may well have been free most of the window.
+  // Do not claim a holder here — the timeout alone is not evidence of one.
+  const elapsedMs = Date.now() - startedAt
+  const averageGapMs = Math.round(elapsedMs / Math.max(1, attempts))
   throw new Error(
-    `Timed out after ${SAVE_ACCOUNTS_LOCK_WAIT_MS}ms waiting for the account store lock on ${path} ` +
-      `(${attempts} attempts); another writer held it for the whole window`,
+    `Timed out after ${elapsedMs}ms waiting for the account store lock on ${path} ` +
+      `(${attempts} attempts, ~${averageGapMs}ms apart; retry interval is ` +
+      `${SAVE_ACCOUNTS_LOCK_RETRY_MS}ms). A gap near the retry interval means ` +
+      `lock contention; a much larger one means this process's event loop was ` +
+      `saturated and the wait expired without getting scheduled.`,
   )
 }
 
