@@ -23,7 +23,14 @@ import { quotaWindowResetIsPast } from './quota-manager.ts'
 import { acquireRefreshFileLock } from './refresh-file-lock'
 
 const logR = createLogger('refresh')
+const logA = createLogger('accounts')
+// How long a holder's lock stays valid. A crashed holder blocks contenders for
+// at most this long before the eviction path reclaims it.
 const SAVE_ACCOUNTS_LOCK_TTL_MS = 10_000
+// How long an acquirer waits before giving up. Deliberately NOT the TTL: with
+// the two equal, a waiter can expire at the exact moment a live holder's lock
+// does, so a legitimately-busy store is indistinguishable from a wedged one.
+const SAVE_ACCOUNTS_LOCK_WAIT_MS = 15_000
 const SAVE_ACCOUNTS_LOCK_RETRY_MS = 50
 
 // ---------------------------------------------------------------------------
@@ -870,8 +877,10 @@ function mergeStorageForSave(
 }
 
 async function acquireSaveAccountsLock(path: string) {
-  const deadline = Date.now() + SAVE_ACCOUNTS_LOCK_TTL_MS
+  const deadline = Date.now() + SAVE_ACCOUNTS_LOCK_WAIT_MS
+  let attempts = 0
   while (Date.now() <= deadline) {
+    attempts++
     const lock = await acquireRefreshFileLock({
       name: 'save',
       ttlMs: SAVE_ACCOUNTS_LOCK_TTL_MS,
@@ -881,11 +890,24 @@ async function acquireSaveAccountsLock(path: string) {
 
     const remainingMs = deadline - Date.now()
     if (remainingMs <= 0) break
-    await sleep(Math.min(SAVE_ACCOUNTS_LOCK_RETRY_MS, remainingMs))
+    // Jitter the poll so a burst of same-process acquirers does not resynchronize
+    // into lockstep retries against the same instant.
+    await sleep(
+      Math.min(
+        SAVE_ACCOUNTS_LOCK_RETRY_MS + jitterMs(SAVE_ACCOUNTS_LOCK_RETRY_MS),
+        remainingMs,
+      ),
+    )
   }
 
+  // Contention, not a detected conflict: other writers held the lock for the
+  // entire wait window. Say exactly that. No version check ran and no
+  // compare-and-swap failed, so the text must not imply either — an operator
+  // reading this in a log should go looking for write volume, not for stale
+  // data.
   throw new Error(
-    `Timed out acquiring account store lock for ${path}; refusing to overwrite newer account data`,
+    `Timed out after ${SAVE_ACCOUNTS_LOCK_WAIT_MS}ms waiting for the account store lock on ${path} ` +
+      `(${attempts} attempts); another writer held it for the whole window`,
   )
 }
 
@@ -1729,19 +1751,57 @@ export class FallbackAccountManager {
       }
     }
 
-    if (changed) await this.save(storage)
+    // Selection bookkeeping only: refreshAccount() has already persisted any
+    // rotated tokens itself, so what remains here is recorded refresh/quota
+    // errors and lastUsed merges. Losing it delays a backoff stamp; failing the
+    // caller would abort a request that has not been sent yet, which is worse.
+    if (changed) {
+      try {
+        await this.save(storage)
+      } catch (error) {
+        logA.warn('fallback selection bookkeeping not persisted', {
+          pid: process.pid,
+          error: formatErrorMessage(error),
+        })
+      }
+    }
     return usable
   }
 
+  /**
+   * Stamp `lastUsed` on a served account.
+   *
+   * This runs on the request path after a response is already in hand, and
+   * `lastUsed` is telemetry: nothing reads it to make a routing, quota, or
+   * killswitch decision. The WHOLE operation is therefore best-effort, read
+   * included — loadAccounts deliberately rethrows anything that is not ENOENT so
+   * corruption surfaces to callers that must act on it, and a store lock shared
+   * by every session in the host process can legitimately time out under a burst
+   * of concurrent turns. Neither may reach this caller: it would discard a
+   * successful, already-billed provider response to record a timestamp. Losing
+   * the stamp costs nothing a later turn cannot redo.
+   *
+   * Contrast refreshAccount, whose save persists rotated tokens and MUST
+   * propagate: dropping it silently would strand a refresh and invalidate the
+   * account's credentials.
+   */
   async markUsed(account: FallbackAccount) {
-    const storage = await this.load()
-    if (!storage) return
-    const stored = storage.accounts.find(
-      (candidate) => candidate.id === account.id,
-    )
-    if (!stored) return
-    stored.lastUsed = this.now()
-    await this.save(storage)
+    try {
+      const storage = await this.load()
+      if (!storage) return
+      const stored = storage.accounts.find(
+        (candidate) => candidate.id === account.id,
+      )
+      if (!stored) return
+      stored.lastUsed = this.now()
+      await this.save(storage, [stored.id])
+    } catch (error) {
+      logA.warn('lastUsed stamp not persisted', {
+        pid: process.pid,
+        accountId: account.id,
+        error: formatErrorMessage(error),
+      })
+    }
   }
 
   accountPassesQuotaPolicy(
