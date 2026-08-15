@@ -1,8 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { createLogger } from '../logger.ts'
+import {
+  ACCOUNT_FILE_NAME,
+  ACCOUNT_STATE_FILE_NAME,
+  deriveStatePath,
+  getAccountStatePath,
+  getAccountStoragePath,
+} from './account-paths'
 import { writeJsonAtomic } from './atomic-write'
 import {
   buildQuotaOperationError,
@@ -37,37 +42,15 @@ const SAVE_ACCOUNTS_LOCK_RETRY_MS = 50
 // Paths
 // ---------------------------------------------------------------------------
 
-export const ACCOUNT_FILE_NAME = 'openai-auth.json'
-export const ACCOUNT_STATE_FILE_NAME = 'openai-auth-state.json'
-
-function getConfigDir() {
-  if (process.env.OPENCODE_CONFIG_DIR?.trim()) {
-    return process.env.OPENCODE_CONFIG_DIR.trim()
-  }
-  return join(
-    process.env.XDG_CONFIG_HOME || join(homedir(), '.config'),
-    'opencode',
-  )
-}
-
-export function getAccountStoragePath() {
-  return (
-    process.env.OPENCODE_OPENAI_AUTH_FILE?.trim() ||
-    join(getConfigDir(), ACCOUNT_FILE_NAME)
-  )
-}
-
-export function getAccountStatePath(configPath = getAccountStoragePath()) {
-  const explicit = process.env.OPENCODE_OPENAI_AUTH_STATE_FILE?.trim()
-  if (explicit) return explicit
-  return deriveStatePath(configPath)
-}
-
-/** Derive the state-file path from the config path without reading env vars. */
-function deriveStatePath(configPath: string): string {
-  return configPath.endsWith(ACCOUNT_FILE_NAME)
-    ? join(dirname(configPath), ACCOUNT_STATE_FILE_NAME)
-    : `${configPath}.state.json`
+// Re-exported so existing importers keep their current entry point; the
+// definitions live in account-paths.ts so the lock module can share them
+// without an import cycle.
+export {
+  ACCOUNT_FILE_NAME,
+  ACCOUNT_STATE_FILE_NAME,
+  deriveStatePath,
+  getAccountStatePath,
+  getAccountStoragePath,
 }
 
 // ---------------------------------------------------------------------------
