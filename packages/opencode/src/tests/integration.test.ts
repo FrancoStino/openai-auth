@@ -3640,6 +3640,13 @@ describe('integration: active fallback routing', () => {
           seenAuth.push(headerValue(init, 'authorization'))
         }
       }
+      // Fail quota requests: sticky placement weighs each account's known
+      // quota, and answering the loader's startup refresh with an empty success
+      // publishes an unknown reading that changes which account this test's
+      // second request is placed on.
+      if (!isResponsesSend(url)) {
+        return new Response('{}', { status: 500 })
+      }
       return new Response('{}', { status: 200 })
     }) as unknown as typeof globalThis.fetch
 
