@@ -3688,8 +3688,12 @@ describe('integration: active fallback routing', () => {
     const seenAuth: string[] = []
     const originalFetch = globalThis.fetch
     globalThis.fetch = (async (url: unknown, init?: unknown) => {
+      // Fail quota requests rather than answering them: this test drives an
+      // account to exhaustion through its own sends, and a successful empty
+      // body from the loader's startup refresh publishes an unknown snapshot
+      // over that state.
       if (!String(url).includes('responses'))
-        return new Response('{}', { status: 200 })
+        return new Response('{}', { status: 500 })
       const auth = headerValue(init, 'authorization')
       seenAuth.push(auth)
       if (auth.includes('fallback-2-token')) {
@@ -6762,8 +6766,12 @@ describe('integration: active fallback routing', () => {
     let hooks: Hooks | undefined
     Date.now = () => now
     try {
-      globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
-        if (init) warmRequests.push(init)
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        // Record only the keep-warm request this test is about — the replay the
+        // plugin sends to keep a prompt cache alive. The loader's startup quota
+        // refresh also passes through this stub, and capturing that would make
+        // the assertion below race it.
+        if (init && isResponsesSend(url)) warmRequests.push(init)
         return new Response('{}', { status: 200 })
       }) as typeof globalThis.fetch
       await withFakeWebSocket(
@@ -6992,7 +7000,13 @@ describe('integration: active fallback routing', () => {
       'x-codex-secondary-window-minutes': '10080',
       'x-codex-secondary-reset-at': String(farFuture),
     }
-    globalThis.fetch = (async () => {
+    globalThis.fetch = (async (url: unknown) => {
+      // Fail quota requests: this test asserts a window disappears from cache
+      // once the account stops sending it, and the loader's startup quota
+      // refresh would answer from this stub and republish the window.
+      if (!isResponsesSend(url)) {
+        return new Response('{}', { status: 500 })
+      }
       return new Response('{}', {
         status: 200,
         headers: { 'content-type': 'application/json', ...responseHeaders },
