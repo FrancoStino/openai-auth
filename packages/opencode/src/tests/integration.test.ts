@@ -3910,8 +3910,15 @@ describe('integration: active fallback routing', () => {
     seedStickyBalancedAccounts()
     const prompts: string[] = []
     const originalFetch = globalThis.fetch
-    globalThis.fetch = (async () =>
-      new Response('{}', { status: 200 })) as unknown as typeof globalThis.fetch
+    // Fail quota requests: the loader's startup quota refresh answers from this
+    // stub too, and a successful empty body publishes an unknown snapshot that
+    // disturbs the state this test establishes through its own sends.
+    globalThis.fetch = (async (url: unknown) =>
+      isResponsesSend(url)
+        ? new Response('{}', { status: 200 })
+        : new Response('{}', {
+            status: 500,
+          })) as unknown as typeof globalThis.fetch
 
     let hooks: Hooks | undefined
     try {
@@ -3956,8 +3963,15 @@ describe('integration: active fallback routing', () => {
   it('sticky-balanced does not pin sessionless or non-replayable requests', async () => {
     seedStickyBalancedAccounts()
     const originalFetch = globalThis.fetch
-    globalThis.fetch = (async () =>
-      new Response('{}', { status: 200 })) as unknown as typeof globalThis.fetch
+    // Fail quota requests: the loader's startup quota refresh answers from this
+    // stub too, and a successful empty body publishes an unknown snapshot that
+    // disturbs the state this test establishes through its own sends.
+    globalThis.fetch = (async (url: unknown) =>
+      isResponsesSend(url)
+        ? new Response('{}', { status: 200 })
+        : new Response('{}', {
+            status: 500,
+          })) as unknown as typeof globalThis.fetch
 
     let hooks: Hooks | undefined
     try {
@@ -4914,7 +4928,13 @@ describe('integration: active fallback routing', () => {
     )
 
     const originalFetch = globalThis.fetch
-    globalThis.fetch = (async (_url: unknown, _init?: unknown) => {
+    globalThis.fetch = (async (url: unknown, _init?: unknown) => {
+      // Fail quota requests: this test asserts which account the served quota is
+      // attributed to, and the loader's startup quota refresh would answer from
+      // this same stub and attribute a second reading of its own.
+      if (!isResponsesSend(url)) {
+        return new Response('{}', { status: 500 })
+      }
       return new Response('{}', {
         status: 200,
         headers: {
