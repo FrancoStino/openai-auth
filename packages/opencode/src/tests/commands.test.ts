@@ -1688,8 +1688,43 @@ describe('commands', () => {
     expect(payload.text).toContain('10% used')
     expect(payload.text).toContain('50% used')
 
+    // A recoverable failure keeps the short retry line, and the raw error stays
+    // hidden — it names internal endpoints and helps nobody here.
     expect(payload.text).toContain('- fb-2: fetch failed — Refresh to retry')
     expect(payload.text).not.toContain('wham usage check failed: 401')
+  })
+
+  test('a permanently rejected account is told to re-add, not to retry', async () => {
+    // Refreshing cannot revive a token the provider has rejected, so the retry
+    // line sends the operator into an indefinite wait while the account stays
+    // dead. The message has to name the one action that works: re-adding it.
+    const qm = new QuotaManager({
+      storage: { version: 1 as const, accounts: [] },
+    })
+
+    const ctx: CommandContext = {
+      accountStoragePath: configPath,
+      quotaManager: qm,
+      loadAccounts,
+      client: makeClient(),
+      refreshAllQuota: async () => [
+        { account: 'main', ok: true },
+        {
+          account: 'fb-2',
+          ok: false,
+          error: 'Token refresh failed: 401; next retry in 24h',
+          permanent: true,
+        },
+      ],
+    }
+
+    const payload = await buildDialogPayload('openai-quota', '', ctx)
+
+    expect(payload.text).toContain('remove and add this account again')
+    // The useless advice must be gone for this account, and the raw error must
+    // still not reach the operator.
+    expect(payload.text).not.toContain('- fb-2: fetch failed')
+    expect(payload.text).not.toContain('Token refresh failed: 401')
   })
 
   test('refreshAllQuota undefined → falls back to cached display', async () => {

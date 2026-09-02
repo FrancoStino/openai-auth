@@ -194,7 +194,21 @@ async function executeQuotaCommand(
     if (failures.length > 0) {
       lines.push('')
       for (const f of failures) {
-        lines.push(`- ${f.account}: fetch failed — Refresh to retry`)
+        // Two different messages, because they need two different actions.
+        // Every failure used to read "fetch failed — Refresh to retry", which
+        // made a token the provider had permanently rejected look like a
+        // momentary blip and recommended a remedy that cannot work: refreshing
+        // never revives such a token, so an operator following that advice
+        // waits indefinitely instead of re-adding the account.
+        //
+        // The raw error stays hidden on purpose — it names internal endpoints
+        // and helps nobody here. What the operator needs is which of the two
+        // situations they are in.
+        lines.push(
+          f.permanent
+            ? `- ${f.account}: sign-in no longer accepted — remove and add this account again`
+            : `- ${f.account}: fetch failed — Refresh to retry`,
+        )
       }
     }
   }
