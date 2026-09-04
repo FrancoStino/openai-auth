@@ -385,6 +385,21 @@ describe('provider.models filter', () => {
     expect(models['gpt-6-astra']).toBeDefined()
   })
 
+  it('keeps gpt-6-astra inside the cheap pricing tier', async () => {
+    // The cap is a cost decision, not a capability one: the backend accepted
+    // 876,934 input tokens from this model when measured, but OpenAI charges 2x
+    // input and 1.5x output on the whole request once it passes 272k input
+    // tokens, so `input` has to stay under that line.
+    const models = await surfacedModels()
+    const limit = models['gpt-6-astra']?.limit
+    expect(limit?.input).toBeLessThan(272_000)
+    expect(limit).toEqual({
+      context: 372_000,
+      input: 244_000,
+      output: 128_000,
+    })
+  })
+
   it('drops the bare gpt-6 and its synthetics', async () => {
     // Refused by the backend as "not supported when using Codex with a ChatGPT
     // account", exactly like the bare gpt-5.6.

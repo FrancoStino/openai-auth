@@ -148,11 +148,15 @@ const ALLOWED_MODELS = new Set([
 // using Codex with a ChatGPT account") and serves only the named gpt-6-astra
 // variant, so any -fast/-pro synthetics inheriting api.id "gpt-6" drop with it.
 const DISALLOWED_MODELS = new Set(['gpt-5.6', 'gpt-6'])
-// Exact models currently marked `use_responses_lite` in Codex's catalog.
+// Exact models currently marked `use_responses_lite` in Codex's catalog. Read
+// from the backend's own model list rather than assumed:
+//   GET /backend-api/codex/models?client_version=<v>
+// reports `use_responses_lite` per model, and gpt-6-astra is marked true.
 const RESPONSES_LITE_MODELS = new Set([
   'gpt-5.6-sol',
   'gpt-5.6-terra',
   'gpt-5.6-luna',
+  'gpt-6-astra',
 ])
 const OAUTH_DUMMY_KEY = 'opencode-oauth-dummy-key'
 const CODEX_BETA_FEATURES = 'terminal_resize_reflow'
@@ -1055,9 +1059,17 @@ export async function CodexAuthPlugin(
                       input: 272_000,
                       output: 128_000,
                     }
-                  : // gpt-5.6 (luna/sol/terra) real context window is 372k on
-                    // the Codex backend, not the 1.05M models.dev reports.
-                    model.id.includes('gpt-5.6')
+                  : // Capped to keep a turn inside the cheap pricing tier, not
+                    // because the backend cannot take more. OpenAI charges 2x
+                    // input and 1.5x output ON THE WHOLE REQUEST once it
+                    // exceeds 272k input tokens, so `input` stays below that
+                    // line and `context` is that cap plus the output reserve.
+                    // The backend itself accepts far more — measured 2026-09-04,
+                    // gpt-5.6-sol took 861,550 input tokens and gpt-6-astra
+                    // 876,934 — so raising these is a cost decision, never a
+                    // capability one. gpt-6-astra carries the same 272k tier.
+                    model.id.includes('gpt-5.6') ||
+                      model.id.includes('gpt-6-astra')
                     ? {
                         context: 372_000,
                         input: 244_000,
