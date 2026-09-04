@@ -265,8 +265,9 @@ describe('command dialogs', () => {
             usedPercent: 100,
             availableCount: 4,
             applicableAvailableCount: 0,
-            eligible: false,
-            reason: 'no applicable credits',
+            eligible: true,
+            selectedCreditId: 'credit-3',
+            selectedCreditExpiresAt: '2026-08-03T00:00:00.000Z',
           },
         ],
       },
@@ -547,8 +548,8 @@ describe('command dialogs', () => {
     expect(
       options.find((option) => option.value === 'account:no-credits'),
     ).toMatchObject({
-      title: 'No credits — no applicable credits',
-      description: '100% · 0/4',
+      title: 'No credits — eligible',
+      description: '100% · 0/4 · exp 2026-08-03',
     })
   })
 
@@ -576,9 +577,7 @@ describe('command dialogs', () => {
     ).not.toBe(true)
     expect(
       options.find((option) => option.value === 'account:no-credits'),
-    ).toMatchObject({
-      title: expect.stringContaining('no applicable credits'),
-    })
+    ).toMatchObject({ title: expect.stringContaining('eligible') })
     expect(
       options.find((option) => option.value === 'account:no-credits')?.disabled,
     ).not.toBe(true)
