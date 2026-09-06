@@ -282,6 +282,8 @@ export function streamResponsesWebSocket(
   let controller: ReadableStreamDefaultController<Uint8Array> | undefined
   let cleanupSocket = () => {}
   let completed = false
+  /** Serialized size of the request frame, reported when the peer rejects it. */
+  let sentBytes = 0
   let emitted = false
   let emittedOutput = false
   let idleTimer: ReturnType<typeof setTimeout> | undefined
@@ -597,13 +599,19 @@ export function streamResponsesWebSocket(
 
   function onClose(event: CloseEvent) {
     if (completed) return
+    // 1009 is the peer refusing this request's size. The next attempt would
+    // send the same bytes and be refused again, so retrying only repeats the
+    // upload. Report the size instead: it is the thing the operator can act on.
+    const oversized = event.code === 1009
     invalidateTransport(
       new ResponseStreamError(
         closeMessage(
           'WebSocket closed before response.completed',
           event.code,
           event.reason,
+          oversized ? sentBytes : undefined,
         ),
+        { retryable: !oversized },
       ),
     )
   }
@@ -640,7 +648,9 @@ export function streamResponsesWebSocket(
     const { background: _background, ...payload } = options.body
     resetIdleTimeout('idle timeout sending websocket request')
     try {
-      socket.send(JSON.stringify({ type: 'response.create', ...payload }))
+      const frame = JSON.stringify({ type: 'response.create', ...payload })
+      sentBytes = frame.length
+      socket.send(frame)
       resetIdleTimeout('idle timeout waiting for websocket')
     } catch (error) {
       if (completed) return
@@ -843,11 +853,24 @@ function isProviderRetryableAbortReason(reason: unknown): reason is Error {
   )
 }
 
-function closeMessage(message: string, code: number, reason: string | Buffer) {
+function closeMessage(
+  message: string,
+  code: number,
+  reason: string | Buffer,
+  sentBytes?: number,
+) {
   const details = [`code ${code}`]
   if (code === 1009) details.push('message too big')
   if (reason.length > 0) details.push(reason.toString())
+  if (sentBytes !== undefined && sentBytes > 0)
+    details.push(`request was ${formatBytes(sentBytes)}`)
   return `${message} (${details.join(': ')})`
+}
+
+function formatBytes(bytes: number) {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${bytes} B`
 }
 
 export * as OpenAIWebSocket from './ws'

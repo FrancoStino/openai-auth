@@ -2372,6 +2372,113 @@ describe('createWebSocketFetch', () => {
       },
     )
   })
+
+  test('a 1009 close fails the turn without a retry and reports the request size', async () => {
+    await withFakeWebSocket(
+      ({ message, close }) => ({
+        send(data) {
+          // Mirrors the reported shape: the small prewarm frame is accepted and
+          // the oversized turn that follows is refused.
+          if (data.length > 5000) {
+            close(1009, '')
+            return
+          }
+          message(
+            JSON.stringify({
+              type: 'response.completed',
+              response: { id: 'resp_prewarm' },
+            }),
+          )
+        },
+      }),
+      async () => {
+        const websocketFetch = createWebSocketFetch({
+          url: 'https://example.test/backend-api/codex/responses',
+        })
+        const response = await websocketFetch(
+          'https://example.test/backend-api/codex/responses',
+          streamRequest({ input: [{ note: 'x'.repeat(20000) }] }),
+        )
+
+        let caught: unknown
+        try {
+          await response.text()
+        } catch (error) {
+          caught = error
+        }
+
+        expect(caught).toBeInstanceOf(ResponseStreamError)
+        const failure = caught as ResponseStreamError
+        // Resending the same oversized body only repeats the upload.
+        expect(failure.isRetryable).toBe(false)
+        expect(failure.message).toContain('message too big')
+        expect(failure.message).toMatch(/request was \d+(\.\d+)? (KB|MB)/)
+        websocketFetch.close()
+      },
+    )
+  })
+
+  test('a 1009 on the first frame is non-retryable too', async () => {
+    await withFakeWebSocket(
+      ({ close }) => ({
+        send() {
+          // Refused before any turn completes, which is the shape a session
+          // hits when its very first replay is already over the limit.
+          close(1009, '')
+        },
+      }),
+      async () => {
+        const websocketFetch = createWebSocketFetch({
+          url: 'https://example.test/backend-api/codex/responses',
+        })
+        const response = await websocketFetch(
+          'https://example.test/backend-api/codex/responses',
+          streamRequest({ input: [] }),
+        )
+
+        let caught: unknown
+        try {
+          await response.text()
+        } catch (error) {
+          caught = error
+        }
+
+        expect((caught as ResponseStreamError).isRetryable).toBe(false)
+        websocketFetch.close()
+      },
+    )
+  })
+
+  test('an ordinary mid-stream close stays retryable and carries no size', async () => {
+    await withFakeWebSocket(
+      ({ close }) => ({
+        send() {
+          close(1006, 'socket closed')
+        },
+      }),
+      async () => {
+        const websocketFetch = createWebSocketFetch({
+          url: 'https://example.test/backend-api/codex/responses',
+        })
+        const response = await websocketFetch(
+          'https://example.test/backend-api/codex/responses',
+          streamRequest({ input: [] }),
+        )
+
+        let caught: unknown
+        try {
+          await response.text()
+        } catch (error) {
+          caught = error
+        }
+
+        const failure = caught as ResponseStreamError
+        expect(failure.isRetryable).toBe(true)
+        expect(failure.message).not.toContain('request was')
+        websocketFetch.close()
+      },
+    )
+  })
 })
 
 function streamRequest(body: Record<string, unknown>): RequestInit {
