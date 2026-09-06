@@ -2373,13 +2373,19 @@ describe('createWebSocketFetch', () => {
     )
   })
 
-  test('a 1009 close fails the turn without a retry and reports the request size', async () => {
+  test('a 1009 after output has streamed fails with the size and no retry', async () => {
     await withFakeWebSocket(
       ({ message, close }) => ({
         send(data) {
-          // Mirrors the reported shape: the small prewarm frame is accepted and
-          // the oversized turn that follows is refused.
           if (data.length > 5000) {
+            // Output first: past this point the turn cannot move to another
+            // transport without replaying what the user already saw.
+            message(
+              JSON.stringify({
+                type: 'response.output_item.done',
+                item: { type: 'message', id: 'msg_1' },
+              }),
+            )
             close(1009, '')
             return
           }
@@ -2407,43 +2413,52 @@ describe('createWebSocketFetch', () => {
           caught = error
         }
 
-        expect(caught).toBeInstanceOf(ResponseStreamError)
-        const failure = caught as ResponseStreamError
-        // Resending the same oversized body only repeats the upload.
-        expect(failure.isRetryable).toBe(false)
+        // Not a retryable APICallError: after output, replaying would repeat
+        // text and re-run tools, so the turn ends here.
+        expect(APICallError.isInstance(caught)).toBe(false)
+        const failure = caught as Error
         expect(failure.message).toContain('message too big')
         expect(failure.message).toMatch(/request was \d+(\.\d+)? (KB|MB)/)
+        expect(failure.message).toContain('not retried: output already emitted')
         websocketFetch.close()
       },
     )
   })
 
-  test('a 1009 on the first frame is non-retryable too', async () => {
+  test('a 1009 before any output finishes the turn over HTTP', async () => {
+    const httpCalls: string[] = []
     await withFakeWebSocket(
-      ({ close }) => ({
-        send() {
-          // Refused before any turn completes, which is the shape a session
-          // hits when its very first replay is already over the limit.
-          close(1009, '')
+      ({ message, close }) => ({
+        send(data) {
+          if (data.length > 5000) {
+            close(1009, '')
+            return
+          }
+          message(
+            JSON.stringify({
+              type: 'response.completed',
+              response: { id: 'resp_prewarm' },
+            }),
+          )
         },
       }),
       async () => {
         const websocketFetch = createWebSocketFetch({
           url: 'https://example.test/backend-api/codex/responses',
+          httpFetch: (async (input: URL | RequestInfo) => {
+            httpCalls.push(String(input))
+            return new Response('{"ok":true}', { status: 200 })
+          }) as unknown as typeof fetch,
         })
         const response = await websocketFetch(
           'https://example.test/backend-api/codex/responses',
-          streamRequest({ input: [] }),
+          streamRequest({ input: [{ note: 'x'.repeat(20000) }] }),
         )
 
-        let caught: unknown
-        try {
-          await response.text()
-        } catch (error) {
-          caught = error
-        }
-
-        expect((caught as ResponseStreamError).isRetryable).toBe(false)
+        // The turn survives on the transport that does not impose the limit,
+        // instead of failing or resending the same oversized frame.
+        expect(httpCalls).toHaveLength(1)
+        expect(await response.text()).toBe('{"ok":true}')
         websocketFetch.close()
       },
     )

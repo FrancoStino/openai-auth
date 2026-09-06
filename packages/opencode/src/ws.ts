@@ -174,6 +174,21 @@ export function isUpgradeFailure(error: unknown): boolean {
   )
 }
 
+// Close code 1009: the peer refused the frame for its size. Marked rather than
+// matched on the message so the transport decision does not depend on wording.
+const oversizedFrames = new WeakSet<object>()
+
+export function isOversizedFrame(error: unknown): boolean {
+  return (
+    typeof error === 'object' && error !== null && oversizedFrames.has(error)
+  )
+}
+
+export function markOversizedFrame<T extends object>(error: T): T {
+  oversizedFrames.add(error)
+  return error
+}
+
 function upgradeFailure(message: string, cause?: unknown): Error {
   const error = new Error(message, cause === undefined ? undefined : { cause })
   upgradeFailures.add(error)
@@ -599,21 +614,21 @@ export function streamResponsesWebSocket(
 
   function onClose(event: CloseEvent) {
     if (completed) return
-    // 1009 is the peer refusing this request's size. The next attempt would
-    // send the same bytes and be refused again, so retrying only repeats the
-    // upload. Report the size instead: it is the thing the operator can act on.
+    // 1009 is the peer refusing this request's size. Resending the same bytes
+    // over the same transport is pointless, so it is not retryable here; the
+    // pool routes it to HTTP instead when nothing has streamed yet. The size
+    // goes in the message because it is the part an operator can act on.
     const oversized = event.code === 1009
-    invalidateTransport(
-      new ResponseStreamError(
-        closeMessage(
-          'WebSocket closed before response.completed',
-          event.code,
-          event.reason,
-          oversized ? sentBytes : undefined,
-        ),
-        { retryable: !oversized },
+    const failure = new ResponseStreamError(
+      closeMessage(
+        'WebSocket closed before response.completed',
+        event.code,
+        event.reason,
+        oversized ? sentBytes : undefined,
       ),
+      { retryable: !oversized },
     )
+    invalidateTransport(oversized ? markOversizedFrame(failure) : failure)
   }
 
   function onAbort() {
